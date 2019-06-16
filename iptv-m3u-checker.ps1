@@ -1,421 +1,534 @@
+<#
+.SYNOPSIS
+    IPTV-PLAYLIST-CHECKER to checking playlist iptv
+ 
+.DESCRIPTION
+    
+ 
+.PARAMETER Thread
+    Number of Background Thread running in same time.
+ 
+.PARAMETER UseFFProbe
+    -UseFFProbe testing url with ffprobe.
+  
+.EXAMPLE
+     iptv-m3u-checker.ps1 -Path "C:\iptv.m3u"
+ 
+.EXAMPLE
+     iptv-m3u-checker.ps1 -Path "C:\iptv.m3u" -Thread 32 -OnlyWorking
+ 
+.INPUTS
+    None
+ 
+.OUTPUTS
+    None
+ 
+.NOTES
+    Author:  Artur P.
+#>
+
 param (
-    [Parameter(Mandatory = $true)][string]$Path,
-    [switch]$Multioutput = $false,
+    # Path to file
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+
+    # to join readed playlists and save it into one file
+    [switch]$SingleOutput = $false,
+
+    # to use ffprobe for checking url
+    [switch]$UseFFProbe = $false,
+
+    # not working yet 
     [switch]$OutLogs = $false,
+
+    # save only working playlists
     [switch]$OnlyWorking = $false,
+
+    # not working yet 
     [switch]$version = $false,
-    [string]$LogPath = $("C:\Logs\Log_" + $(Get-Date -UFormat "%H%M%d%m%y") + ".log"),
-    [int32]$Thread = $((Get-CIMInstance -Class 'CIM_Processor').NumberOfLogicalProcessors * (Get-CIMInstance -Class 'CIM_Processor').NumberOfCores)
+
+    # not working yet 
+    [string]$LogPath = $("C:\Logs\Log_" + $(Get-Date -UFormat "%Y%m%d%H%M%S") + ".log"),
+
+    # numbers of running Threades into background
+    [int32]$Thread = [int32]$((Get-CIMInstance -Class 'CIM_Processor').NumberOfLogicalProcessors * (Get-CIMInstance -Class 'CIM_Processor').NumberOfCores),
+
+    # how many time file is checked if return error.
+    [int32]$ErrorRepeat = 2
 )
 
-
-class Playlist
+Begin
 {
-    [System.IO.FileSystemInfo]$filesysteminfo
-    [string]$uri
-    [string]$name
-    [string]$ext
-    [string]$suffixTrue = "_working"
-    [string]$suffixFalse = "_notWorking"
-    [int32]$playlistsNumber = 0
-    [int32]$chanelNumbers = 0
-    [int32]$chanelTrue = 0
-    [int32]$chanelFalse = 0
-    [int32]$thread = 1
-    [bool]$outLogs = $false
-    [bool]$valid = $false
-    [bool]$validContent = $false
-    [bool]$updateStatus = $false
-    [String[]]$contentLines
-    [String[]]$contentString
-    [PSObject[]]$medialist
-    [PSObject[]]$testedList
-
-    Playlist([System.IO.FileInfo]$inputFile, $Thread, $OutLogs, $playlistsNumber)
+    class Chanel
     {
-        $this.filesysteminfo = $inputFile
-        $this.outLogs = $OutLogs
-        $this.thread = $Thread
-        $this.playlistsNumber = $playlistsNumber
-        if (Test-Path($this.filesysteminfo.FullName))
+        [int32]$Nb
+        [string]$Attributes
+        [string]$Name
+        [string]$Url
+        [string]$Message
+        [bool]$Status
+
+        Chanel ([string]$Attributes, [string]$Name, [string]$Url, [int32]$Nb)
         {
-            $this.uri = $inputFile.FullName
-            $this.name = $inputFile.BaseName
-            $this.ext = $inputFile.Extension
-            $this.Open()
-            $this.Cut()
-            if ($this.valid)
-            {
-                $this.chanelNumbers = $this.medialist.Count
-            }
+            $this.Nb = $Nb
+            $this.Attributes = $Attributes
+            $this.Name = $Name
+            $this.Url = $Url
+            $this.Status = $null
+        }
+
+        [void] SetStatus ([bool]$Status)
+        {
+            $this.Status = $Status
+        }
+        [bool] GetStatus ()
+        {
+            return $this.Status
+        }
+        [void] SetMessage ([string]$Message)
+        {
+            $this.Message = $Message
+        }
+        [string] GetMessage ()
+        {
+            return $this.Message
+        }
+        [int32] GetNb ()
+        {
+            return $this.Nb
+        }
+        [string] GetUrl ()
+        {
+            return $this.Url
+        }
+        [string] GetChanel()
+        {
+            return [string]::Format("#EXTINF:{0},{1}`n{2}`n", $this.Attributes, $this.Name, $this.Url)
         }
     }
 
 
-    [void] RunTest()
+    class Playlist
     {
-        if (!$this.valid)
-        {
-            break
+        [System.IO.FileSystemInfo]$playlistFile
+        [int32]$ProbeMethod
+        [int32]$nb
+        [int32]$totalChanelsNumber
+        [int32]$trueChNumber
+        [int32]$falseChNumber
+        [int32]$ErrorRepeat
+        [int32]$timeOut
+        [int32]$thread
+        [DateTime]$CreateTime
+        [DateTime]$ProbeTime
+        [INT]$TotalTime
+        [int]$itemInPool
+        [string]$trueOutPath
+        [string]$falseOutPath
+        [bool]$validContent
+        [System.Collections.ArrayList]$Chanels
+        $xyPos = @{
+            x = 0
+            y = 9
         }
-        $RunspaceCollection = @()
-        $qwinstaResults = New-Object System.Collections.ArrayList
-        $RunspacePool = [RunspaceFactory]::CreateRunspacePool(1, $this.thread)
-        $RunspacePool.Open()
-        $ScriptBlock =
+
+
+        Playlist([System.IO.FileInfo]$File, [int]$Thread = $((Get-CIMInstance -Class 'CIM_Processor').NumberOfCores + 1), [int]$playlistsNumber, [int]$ErrorRepeat = 3, [int]$ProbeMethod = 1)
         {
-            param(
-                [string]$Time,
-                [string[]]$Attributes,
-                [string]$Name,
-                [string]$Uri
+            $this.playlistFile = $File
+            $this.CreateTime = Get-Date
+            $this.trueOutPath = [System.IO.Path]::Combine($this.playlistFile.DirectoryName, "iptv-Working", $this.playlistFile.Name)
+            $this.falseOutPath = [System.IO.Path]::Combine($this.playlistFile.DirectoryName, "iptv-NotWorking", $this.playlistFile.Name)
+            $this.ErrorRepeat = $ErrorRepeat
+            $this.ProbeMethod = $ProbeMethod
+            $this.thread = $Thread
+            $this.timeOut = 3000
+            $this.nb = $playlistsNumber
+            $this.itemInPool = 0
+            $this.validContent = $null
+            $this.xyPos.y += $this.nb
+            $this.Chanels = New-Object System.Collections.ArrayList
+        }
+
+        [void] SetProbeMethod([int]$ProbeMethod)
+        {
+            $this.ProbeMethod = $ProbeMethod
+        }
+        [int32] GetProbeMethod()
+        {
+            return $this.ProbeMethod
+        }
+        [void] SetTotalTime()
+        {
+            $this.TotalTime = [int]$(New-TimeSpan -Start $this.CreateTime -End $this.ProbeTime).TotalSeconds
+        }
+        [string] GetTime()
+        {
+            $local:tempTime = New-TimeSpan -Seconds $this.TotalTime
+            return  [string]::format("{0:d2}:{1:d2}:{2:d2}", [int]$tempTime.Hours, [int]$tempTime.Minutes, [int]$tempTime.Seconds)
+        }
+
+        [string] GetPrintOut ()
+        {
+            return [string]::Format(
+                "|{0,3} |{1,34} |{2,8} |{3,10} |{4,10} |{5,10} |{6,10} | {7,14}  |",
+                $($this.nb + 1),
+                $this.playlistFile.BaseName,
+                $this.validContent,
+                $this.totalChanelsNumber,
+                $this.itemInPool,
+                $this.trueChNumber,
+                $this.falseChNumber,
+                $this.GetTime()
             )
-
-            [string]$ErrorMessage = ""
-
-            try
-            {
-                ffprobe.exe -loglevel -8 -rw_timeout 100000 -i $Uri
-            }
-            Catch
-            {
-                $ErrorMessage = $_.Exception.Message
-                $Status = $false
-                Break
-            }
-            finally
-            {
-                if ($?)
-                {
-                    $Status = $true
-                }
-                else
-                {
-                    $Status = $false
-                }
-            }
- 
-            return New-Object PSObject -Property @{
-                Time         = $Time
-                Attributes   = $Attributes
-                Name         = $Name
-                Uri          = $Uri
-                Status       = $Status
-                ErrorMessage = $ErrorMessage
-            }
         }
 
-        Foreach ($item in $this.medialist)
+        [void] Parser()
         {
-            $Powershell = [PowerShell]::Create().AddScript($ScriptBlock).AddArgument($item.Time).AddArgument($item.Attributes).AddArgument($item.Name).AddArgument($item.Uri)
-            $Powershell.RunspacePool = $RunspacePool
-            [Collections.Arraylist]$RunspaceCollection += New-Object -TypeName PSObject -Property @{
-                Runspace   = $PowerShell.BeginInvoke()
-                PowerShell = $PowerShell  
+            [string]$local:content = ([System.IO.File]::ReadAllText($this.playlistFile.FullName)).Replace("`r", "")
+
+            ForEach ($Match in ($content | Select-String -Pattern "(?m)#EXTINF:(.*?)\s*\,\s*(.*)\s*\n[\n\s]*(\w+:\/\/\S+)" -AllMatches).Matches)
+            {
+                [void]$this.Chanels.Add([Chanel]::new(
+                        $Match.Groups[1].Value,
+                        $Match.Groups[2].Value,
+                        $Match.Groups[3].Value,
+                        $this.totalChanelsNumber
+                    )
+                )
+                $this.totalChanelsNumber++
+                $this.RefreshScreen($this.totalChanelsNumber, 15)
+                $this.ProbeTime = Get-Date
+                $this.SetTotalTime()
             }
+            if ($this.Chanels.Count -gt 0)
+            {
+                $this.validContent = $true
+            }
+            else
+            {
+                $this.validContent = $false
+            }
+            $this.RefreshScreen($this.totalChanelsNumber, 1)
         }
 
-        While ($RunspaceCollection)
+    
+        [void] ProbeIt()
         {
-            Foreach ($Runspace in $RunspaceCollection.ToArray())
+            if ($this.validContent)
             {
-                If ($Runspace.Runspace.IsCompleted)
-                {
-                    [void]$qwinstaResults.Add($Runspace.PowerShell.EndInvoke($Runspace.Runspace))
-                    $this.chanelNumbers--
-                    if ($qwinstaResults[-1].Status)
+                $ffScriptBlock = {
+                    Param(
+                        [int32]$method,
+                        [int32]$nb,
+                        [int32]$timeout,
+                        [int32]$errCounter,
+                        [string]$url
+                    )
+                    [bool]$local:rStatus = $null
+                    [string]$local:Message = [string]::Empty()
+                    if ($method -eq 1)
                     {
-                        $this.chanelTrue++
-                        if (!$this.validContent) 
+                        while ([bool]$errCounter)
                         {
-                            $this.validContent = $true
+                            try
+                            {
+                                $request = [System.Net.WebRequest]::Create($url)
+                                $request.timeout = $timeout
+                                $resp = $request.GetResponse()
+                                if ([int]$resp.StatusCode -eq 200)
+                                {
+                                    $rStatus = $true
+                                }
+                                else
+                                {
+                                    $rStatus = $false
+                                }
+                                if ([int]$resp.ContentLength -gt 0 -and [int]$resp.ContentLength -lt 230)
+                                {
+                                    $sr = new-object System.IO.StreamReader ($resp.GetResponseStream())
+                                    $Message = $sr.ReadToEnd()
+                                    $sr.Close()
+                                }
+                                else
+                                {
+                                    $Message = [string]$($resp.Headers | ConvertTo-Json)
+                                }
+                            }
+                            catch
+                            {
+                                $Message = $_.Exception.Message
+                                $rStatus = $false
+                            }
+                            finally
+                            {
+                                $resp.Close()
+                                if (!$rStatus)
+                                {
+                                    $errCounter--
+                                }
+                                else
+                                {
+                                    $errCounter = 0
+                                }
+                            }
                         }
                     }
-                    else
+                    elseif ($method -eq 2)
                     {
-                        $this.chanelFalse++
+                        while ([bool]$errCounter)
+                        {
+                            $Message = ffprobe.exe -hide_banner -timeout $timeout -v 32 -i $url 2>&1
+                            $rStatus = $?
+                            if (!$rStatus)
+                            {
+                                $errCounter--
+                            }
+                            else
+                            {
+                                $errCounter = 0
+                            }
+                        }                            
                     }
-                    $this.PrintStatus()
-                    $Runspace.PowerShell.Dispose()
-                    $RunspaceCollection.Remove($Runspace)
-			
+                    return New-Object PSObject -Property @{
+                        Nb      = $nb
+                        Status  = $rStatus
+                        Message = $Message
+                    }
                 }
+                [int]$step = 650
+                [int]$start = 0
+                [int]$stop = $step - 1
+                [int]$chanelCount = $this.Chanels.Count
+                $runspaces = New-Object System.Collections.ArrayList
+                $pool = [RunspaceFactory]::CreateRunspacePool(1, $this.thread)
+                $pool.Open()
+                Do
+                {                      
+                    foreach ($ch in ($this.Chanels[[int]$start..[int]$stop]))
+                    {
+                        $pwsh = [PowerShell]::Create().AddScript($ffScriptBlock).AddArgument($this.GetProbeMethod()).AddArgument($ch.GetNb()).AddArgument($this.timeOut).AddArgument($this.ErrorRepeat).AddArgument($ch.GetUrl())
+                        $pwsh.RunspacePool = $pool
+                        [System.Collections.ArrayList]$runspaces += New-Object -TypeName PSObject -Property @{
+                            Pipe   = $pwsh
+                            Status = $pwsh.BeginInvoke()
+                        }
+                        $this.itemInPool++
+                        $this.totalChanelsNumber--
+                        $this.RefreshScreen($this.totalChanelsNumber, 5)
+                    }
+                    
+                    while ([bool]$runspaces)
+                    {
+                        Foreach ($runThread in $runspaces.ToArray())
+                        {
+                            If ($runThread.Status.IsCompleted)
+                            {
+                                $ReturnetData = $runThread.Pipe.EndInvoke($runThread.Status)
+                                $this.itemInPool--
+                                $this.Chanels[$ReturnetData.Nb].SetStatus([bool]$ReturnetData.Status)
+                                $this.Chanels[$ReturnetData.Nb].SetMessage([string]$ReturnetData.Message)
+                                $this.ProbeTime = Get-Date
+                                $this.SetTotalTime()
+                                if ([bool]$ReturnetData.Status)
+                                {
+                                    $this.trueChNumber++
+                                }
+                                else
+                                {    
+                                    $this.falseChNumber++
+                                }
+                                $this.RefreshScreen($this.totalChanelsNumber, 5)
+                                Remove-Variable ReturnetData
+                                $runThread.Pipe.Dispose()
+                                $runspaces.Remove($runThread)
+                            }
+                        }                
+                        $this.RefreshScreen($this.totalChanelsNumber, 1)
+                    }
+                    $start += $step
+                    $stop += $step
+                    if ($chanelCount -le $stop)
+                    {
+                        $stop = $chanelCount 
+                    }
+
+                } while ([bool]$this.totalChanelsNumber)
+                $pool.Dispose()
+                $pool.Close() 
             }
         }
 
-        foreach ($item in $qwinstaResults)
+        [void] RefreshScreen([int]$inNumber, [int]$interval = 5)
         {
-            $this.testedList += New-Object PSObject -Property @{
-                Time         = $item[0].Time
-                Attributes   = $item[0].Attributes
-                Name         = $item[0].Name
-                Uri          = $item[0].Uri
-                Status       = $item[0].Status
-                ErrorMessage = $item[0].ErrorMessage
+            if (![bool]$($inNumber % $interval))
+            {   
+                [System.Console]::SetCursorPosition($this.xyPos.x, $this.xyPos.y)
+                Write-Host -Object $this.GetPrintOut() -NoNewLine
             }
         }
-    }
 
-    [void] PrintStatus()
-    {
-        $tempStatus = @{
-            Nb      = [string]::Format("{0,4}", $this.playlistsNumber)
-            Name    = [string]::Format("{0,34}", $this.name)
-            Valid   = [string]::Format("{0,7}", $this.valid)
-            ChNum   = [string]::Format("{0,8}", $this.chanelNumbers)
-            ChTrue  = [string]::Format("{0,9}", $this.chanelTrue)
-            ChFalse = [string]::Format("{0,12}", $this.chanelFalse)
-        }
 
-        [int32]$x = 0
-        [int32]$y = 9 + $this.playlistsNumber
-        if (!$this.updateStatus)
+        [string] GetTrue ([bool]$AddHeader)
         {
-            if ($tempStatus.Name.Length -gt 34)
+            $tempList = [System.Text.StringBuilder]::new()
+            if ($AddHeader)
             {
-                $tempStatus.Name = $($tempStatus.Name.Substring(0, 31) + "...")
+                $tempList.AppendLine("#EXTM3U")
             }
-
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $([string]::Format("{0,4} |{1,34} |{2,7} |{3,8} |{4,9} |{5,12} |", " ", " ", " ", " ", " ", " ")) -NoNewline -ForegroundColor White
-            $this.updateStatus = $true
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.Nb -ForegroundColor Yellow -NoNewline
-            
-            $x = [System.Console]::CursorLeft + 2
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.Name -ForegroundColor Yellow -NoNewline
-            
-            $x = [System.Console]::CursorLeft + 2
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.Valid -ForegroundColor DarkYellow -NoNewline
-            
-            $x = [System.Console]::CursorLeft + 2
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.ChNum -ForegroundColor Yellow -NoNewline
-            
-            $x = [System.Console]::CursorLeft + 2
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.ChTrue -ForegroundColor Green -NoNewline
-            
-            $x = [System.Console]::CursorLeft + 2
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.ChFalse -ForegroundColor Red -NoNewline
-
-
-        }
-        if ($this.updateStatus)
-        {
-            $x = 51
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.ChNum -ForegroundColor Yellow -NoNewline
-            
-            $x += 10
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.ChTrue -ForegroundColor Green -NoNewline
-            
-            $x += 11
-            [System.Console]::SetCursorPosition($x, $y)
-            Write-Host -Object $tempStatus.ChFalse -ForegroundColor Red -NoNewline
-
-        }
-        
-        [System.Console]::SetCursorPosition(0, $(10 + $this.playlistsNumber))
-    }
-
-
-    [string[]] GetTrue([bool]$AddHeader)
-    {
-        [string[]]$tempList = @()
-        if ($AddHeader)
-        {
-            $tempList += "#EXTM3U"
-        }
-        foreach ($item in $($this.testedList | Where { $_.Status -eq $true }))
-        {
-            [string]$tempArgs = ""
-            if ($item.Attributes.Count -gt 0)
+            foreach ($trChan in $($this.Chanels | Where { ($_.GetStatus()) -eq $true }))
             {
-                $tempArgs = $($item.Attributes -join " ").Trim()
+                $tempList.AppendLine($trChan.GetChanel())
             }
-            [string[]]$tempList += [String]::Format("#EXTINF:{0} {1},{2}`n{3}", $item.Time, $tempArgs, $item.Name, $item.Uri)
+            return $tempList.ToString()
         }
-        return $tempList
-    }
-
-    [string[]] GetFalse([bool]$AddHeader)
-    {
-        [string[]]$tempList = @()
-        if ($AddHeader)
+        [string] GetFalse ([bool]$AddHeader)
         {
-            $tempList += "#EXTM3U"
-        }
-        foreach ($item in $($this.testedList | Where { $_.Status -eq $false }))
-        {
-            [string]$tempArgs = ""
-            if ($item.Attributes.Count -gt 0)
+            $tempList = [System.Text.StringBuilder]::new()
+            if ($AddHeader)
             {
-                $tempArgs = $($item.Attributes -join " ").Trim()
+                $tempList.AppendLine("#EXTM3U")
             }
-            [string[]]$tempList += [String]::Format("#EXTINF:{0} {1},{2}`n{3}", $item.Time, $tempArgs, $item.Name, $item.Uri)
-        }
-        return $tempList
-    }
-
-
-
-    [void] Cut()
-    {
-        foreach ($media in $([regex]::Matches($this.contentString, "\#EXTINF\:(\-1|\d+)\s*(.*)\,\s*(.*)[\r\n]+\s*([\S]*)")))
-        {   
-            $media = @{
-                Time         = $media.Groups[1].Value
-                Attributes   = $media.Groups[2].Value.Trim().Split(" ")
-                Name         = $media.Groups[3].Value
-                Uri          = $media.Groups[4].Value
-                Status       = $null
-                ErrorMessage = $null
-            }
-            
-            $this.medialist += New-Object -TypeName PSObject -Property $media
-        }
-        if ($this.medialist.Count -gt 0)
-        {
-            $this.valid = $true
-        }
-        else
-        {
-            $this.valid = $false
-        }
-
-    }
-    [void] Open()
-    {
-        foreach ($line in [IO.File]::ReadAllLines($this.uri))
-        {
-            # if (!$this.valid)
-            # {
-            #     if ($line.Trim() -match "#EXTM3U")
-            #     {
-            #         $this.valid = $true
-            #         continue
-            #     }
-            #     else 
-            #     {
-            #         continue
-            #     }
-                
-            # }
-            # else
-            # {   
-            if (![string]::IsNullOrWhiteSpace($line))
+            foreach ($faChan in $($this.Chanels | Where { ($_.GetStatus()) -eq $false }))
             {
-                $this.contentLines += $line.Trim()
-                continue
+                $tempList.AppendLine($faChan.GetChanel())
             }
-            # }
-            
+            return $tempList.ToString()
         }
-        $this.contentString = $this.contentLines -join "`n"
-
     }
-}
 
-# write-host $Multioutput
-# exit
-$menu = @"
+    if (![bool]$UseFFProbe)
+    {
+        [int32]$ProbeMethod = 1
+    }
+    else
+    {
+        [int32]$ProbeMethod = 2
+    }
+
+    $menu = @"
    ------------------------------------------------------------------------------
     IPTV PLAYLIST CHECKER
    ------------------------------------------------------------------------------
 
 Playlists:
 
------+-----------------------------------+--------+---------+----------+-------------+
- Nb. |               Name                | Valid  | Ch.Num  | Working  | NotWorking  |
------+-----------------------------------+--------+---------+----------+-------------+
++----+-----------------------------------+---------+-----------+-----------+-----------+-----------+-----------------+
+| Nb.|               Name                |  Valid  |  Find CH  |  In Pool  |  Working  |   Death   |  Running Time:  |
++----+-----------------------------------+---------+-----------+-----------+-----------+-----------+-----------------+
 "@
-[System.Console]::CursorVisible = $false
-clear-host
-Write-Host -Object $menu -NoNewLine
+    [System.Console]::CursorVisible = $false
+    clear-host
+    [System.Console]::SetCursorPosition(0, 0)
+    Write-Host -Object $menu -NoNewLine
 
-if ($OutLogs)
-{
-    New-Item -Path $LogPath -Force
 }
-[System.Array]$inputs = $null
-$PlayLists = New-Object System.Collections.ArrayList
-try
+
+Process
 {
-    $inputs += Get-ChildItem -Path $Path
-}
-catch
-{
-    Write-Error -Message $_.Exception.Message
-    break
-}
-finally
-{
-    for ($i = 0; $i -lt $inputs.Count; $i++)
+    [System.Array]$inputs = $null
+    $PlayLists = New-Object System.Collections.ArrayList
+    try
     {
-        [void]$PlayLists.Add([Playlist]::new($inputs[$i], $Thread, $OutLogs, $i))
-        $PlayLists[-1].PrintStatus()
-        Write-Host -Object "-----+-----------------------------------+--------+---------+----------+-------------+" -NoNewline
+        $inputs += Get-ChildItem -Path $Path
     }
-}
-
-try
-{
+    catch
+    {
+        Write-Error -Message $_.Exception.Message
+        break
+    }
+    finally
+    {
+        for ($i = 0; $i -lt $inputs.Count; $i++)
+        {
+            [void]$PlayLists.Add([Playlist]::new($inputs[$i], $Thread, $i, $ErrorRepeat, $ProbeMethod))
+            $PlayLists[-1].RefreshScreen(1, -1)
+            [System.Console]::SetCursorPosition($PlayLists[-1].xyPos.x, $($PlayLists[-1].xyPos.y + 1))
+            Write-Host -Object "+----+-----------------------------------+---------+-----------+-----------+-----------+-----------+-----------------+" -NoNewline
+            $PlayLists[-1].Parser()
+        }
+    }
+    [int]$AllTimes = 0
+    [int]$AllWork = 0
+    [int]$AllNotWork = 0
     foreach ($item in $PlayLists)
     {
-        $item.RunTest()
+        $item.ProbeIt()
+        $AllTimes += (New-TimeSpan $item.CreateTime $item.ProbeTime).TotalSeconds
+        $AllWork += $item.trueChNumber
+        $AllNotWork += $item.falseChNumber
     }
-}
-catch
+    $totTime = New-TimeSpan -Seconds $AllTimes
+    [System.Console]::SetCursorPosition(75, $($PlayLists.Count + 10))
+    Write-Host -Object $([string]::Format("|{0,10} |{1,10} |       {2:d2}:{3:d2}:{4:d2}  |", [int]$AllWork, $AllNotWork, [int]$totTime.Hours, [int]$totTime.Minutes, [int]$totTime.Seconds)) -NoNewline
+    [System.Console]::SetCursorPosition(75, $($PlayLists.Count + 11))
+    Write-Host -Object "+-----------+-----------+-----------------+" -NoNewline
+} 
+End
 {
-    Write-Error -Message $_.Exception.Message
-    break
-}
-finally
-{
-    if ($Multioutput)
+    if (!$SingleOutput)
     {
         foreach ($item in $PlayLists)
         {
             if ($item.ValidContent)
             {
-                [IO.File]::WriteAllLines([System.IO.Path]::Combine($item.filesysteminfo.DirectoryName, $($item.filesysteminfo.BaseName + $item.suffixTrue + $item.filesysteminfo.Extension)), $item.GetTrue($true))
+                if (![bool]$(Test-Path -Path $(split-path $item.trueOutPath -Parent)))
+                {
+                    New-Item -Path $(split-path $item.trueOutPath -Parent) -ItemType Directory -Force
+                }
+                [IO.File]::WriteAllText($item.trueOutPath, $item.GetTrue($true))
             }
             if (!$OnlyWorking)
             {
-                [IO.File]::WriteAllLines([System.IO.Path]::Combine($item.filesysteminfo.DirectoryName, $($item.filesysteminfo.BaseName + $item.suffixFalse + $item.filesysteminfo.Extension)), $item.GetFalse($true))
+                if (![bool]$(Test-Path -Path $(split-path $item.falseOutPath -Parent)))
+                {
+                    New-Item -Path $(split-path $item.falseOutPath -Parent) -ItemType Directory -Force
+                }
+                [IO.File]::WriteAllText($item.falseOutPath, $item.GetFalse($true))
             }
         }
     }
     else #SingleOutput
     {
-        [string[]]$tempTrue = @()
-        $tempTrue += "#EXTM3U"
-        [string[]]$tempFalse = @()
-        $tempFalse += "#EXTM3U"
-
+        [string]$trueMultiPath = [System.IO.Path]::Combine($(Get-Location), "iptv-Working", $($(Get-Date -UFormat "%Y%m%d%H%M%S") + ".m3u"))
+        $tempTrue = [System.Text.StringBuilder]::new()
+        [void]$tempTrue.AppendLine("#EXTM3U")
+        
         foreach ($item in $PlayLists)
         {
             if ($item.ValidContent)
             {
-                $tempTrue += $item.GetTrue($false)
+                [void]$tempTrue.AppendLine($item.GetTrue($false))
             }
-            $tempFalse += $item.GetFalse($false)
         }
-        if ($tempTrue.Count -gt 1)
+
+        if (![bool]$(Test-Path -Path $(split-path $trueMultiPath -Parent)))
         {
-            [IO.File]::WriteAllLines([System.IO.Path]::Combine($(Get-Location), $($(Get-Date -UFormat "%H%M%d%m%y") + '_working.m3u')), $tempTrue)
+            New-Item -Path $(split-path $trueMultiPath -Parent) -ItemType Directory -Force
         }
+        [IO.File]::WriteAllText($trueMultiPath, $tempTrue.ToString())
+
         if (!$OnlyWorking)
         {
-            [IO.File]::WriteAllLines([System.IO.Path]::Combine($(Get-Location), $($(Get-Date -UFormat "%H%M%d%m%y") + '_notWorking.m3u')), $tempFalse)
+            [string]$falseMultiPath = [System.IO.Path]::Combine($(Get-Location), "iptv-NotWorking", $($(Get-Date -UFormat "%Y%m%d%H%M%S") + ".m3u"))
+            $tempFalse = [System.Text.StringBuilder]::new()
+            [void]$tempFalse.AppendLine("#EXTM3U")
+
+            foreach ($item in $PlayLists)
+            {
+                if ($item.ValidContent)
+                {
+                    [void]$tempFalse.AppendLine($item.GetFalse($false))
+                }
+            }
+            if (![bool]$(Test-Path -Path $(split-path $falseMultiPath -Parent)))
+            {
+                New-Item -Path $(split-path $falseMultiPath -Parent) -ItemType Directory -Force
+            }
+            [IO.File]::WriteAllText($falseMultiPath, $tempFalse.ToString())
         }
     }
-    [System.Console]::SetCursorPosition(0, $($PlayLists.Count + 11))
+    [System.Console]::SetCursorPosition(0, $($PlayLists.Count + 13))
     [System.Console]::CursorVisible = $true
 }
 
