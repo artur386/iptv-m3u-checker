@@ -133,7 +133,7 @@ Begin
         }
 
 
-        Playlist([System.IO.FileInfo]$File, [int]$Thread = $((Get-CIMInstance -Class 'CIM_Processor').NumberOfCores + 1), [int]$playlistsNumber, [int]$ErrorRepeat = 3, [int]$ProbeMethod = 1)
+        Playlist([System.IO.FileInfo]$File, [int]$Thread = $((Get-CIMInstance -Class 'CIM_Processor').NumberOfCores + 1), [int]$playlistsNumber, [int]$ErrorRepeat, [int]$ProbeMethod)
         {
             $this.playlistFile = $File
             $this.CreateTime = Get-Date
@@ -454,7 +454,7 @@ Process
     foreach ($item in $PlayLists)
     {
         $item.ProbeIt()
-        $AllTimes += (New-TimeSpan $item.CreateTime $item.ProbeTime).TotalSeconds
+        [Int64]$AllTimes += (New-TimeSpan $item.CreateTime $item.ProbeTime).TotalSeconds
         $AllWork += $item.trueChNumber
         $AllNotWork += $item.falseChNumber
     }
