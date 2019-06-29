@@ -54,7 +54,7 @@ param (
     [int32]$Thread = [int32]$((Get-CIMInstance -Class 'CIM_Processor').NumberOfLogicalProcessors * (Get-CIMInstance -Class 'CIM_Processor').NumberOfCores),
 
     # how many time file is checked if return error.
-    [int32]$ErrorRepeat = 2
+    [int32]$ErrorRepeat = 1
 )
 
 Begin
@@ -137,6 +137,7 @@ Begin
         {
             $this.playlistFile = $File
             $this.CreateTime = Get-Date
+            $this.ProbeTime = Get-Date
             $this.trueOutPath = [System.IO.Path]::Combine($this.playlistFile.DirectoryName, "iptv-Working", $this.playlistFile.Name)
             $this.falseOutPath = [System.IO.Path]::Combine($this.playlistFile.DirectoryName, "iptv-NotWorking", $this.playlistFile.Name)
             $this.ErrorRepeat = $ErrorRepeat
@@ -170,10 +171,19 @@ Begin
 
         [string] GetPrintOut ()
         {
+            if ([int]$this.playlistFile.BaseName.Length -gt 33)
+            {
+                [string]$printName = $this.playlistFile.BaseName.substring(0, 30) + "..."
+            }
+            else
+            {
+                [string]$printName = $this.playlistFile.BaseName
+            }
+            
             return [string]::Format(
                 "|{0,3} |{1,34} |{2,8} |{3,10} |{4,10} |{5,10} |{6,10} | {7,14}  |",
                 $($this.nb + 1),
-                $this.playlistFile.BaseName,
+                $printName,
                 $this.validContent,
                 $this.totalChanelsNumber,
                 $this.itemInPool,
@@ -454,7 +464,7 @@ Process
     foreach ($item in $PlayLists)
     {
         $item.ProbeIt()
-        [Int64]$AllTimes += (New-TimeSpan $item.CreateTime $item.ProbeTime).TotalSeconds
+        [int32]$AllTimes += (New-TimeSpan $item.CreateTime $item.ProbeTime).TotalSeconds
         $AllWork += $item.trueChNumber
         $AllNotWork += $item.falseChNumber
     }
