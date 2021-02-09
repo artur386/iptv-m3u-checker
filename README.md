@@ -17,7 +17,7 @@ ffprobe
 iptv-m3u-checker.ps1 -Path "Path/to/playlist.m3u"
 ```
 or
-Path to dictonary, to import more like one playlist on the same tame.
+Path to dictonary, to import more like one playlist on the same time.
 ```
 iptv-m3u-checker.ps1 -Path "Path/to/*.m3u"
 ```
